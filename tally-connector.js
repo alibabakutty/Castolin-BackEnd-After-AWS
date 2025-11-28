@@ -756,7 +756,6 @@ async function parseTallyCustomersAlternative(xmlData) {
   } catch (err) {
     console.error('❌ Alternative parsing error:', err.message);
   }
-
   return customers;
 }
 
