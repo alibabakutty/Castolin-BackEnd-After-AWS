@@ -1,6 +1,6 @@
 import admin from 'firebase-admin';
 import express from 'express';
-import mysql from 'mysql2';
+import pkg from 'pg';
 import axios from 'axios';
 import serviceAccount from './config/serviceAccountKey.json' with { type: "json" };
 import fs from 'fs';
@@ -13,19 +13,25 @@ if (!admin.apps.length) {
   });
 }
 
-// MySQL Connection
-const mysqlDb = mysql.createConnection({
-  host: "localhost",
-  user: "root",
-  password: "Rup@@.123$",
-  database: "order_management",
+// PostgreSQL Connection Pool
+const pool = new pkg.Pool({
+  host: process.env.PGHOST || "localhost",
+  user: process.env.PGUSER || "postgres",
+  password: process.env.PGPASSWORD || "Rup@@.123$",
+  database: process.env.PGDATABASE || "order_management",
+  port: process.env.PGPORT || 5432,
+  max: 20,
+  idleTimeoutMillis: 30000,
+  connectionTimeoutMillis: 2000,
 });
 
-mysqlDb.connect((err) => {
+// Test connection
+pool.connect((err, client, release) => {
   if (err) {
-    console.error("❌ MySQL connection failed:", err);
+    console.error("❌ PostgreSQL connection failed:", err);
   } else {
-    console.log("✅ Connected to MySQL Database");
+    console.log("✅ Connected to PostgreSQL Database");
+    release();
   }
 });
 
@@ -227,7 +233,22 @@ async function parseTallyCustomers(xmlData) {
           mobileNumber = extractMobileNumber(mobileRaw);
         }
 
-        // 5️⃣ Extract email
+        // 5️⃣ Extract STATE field
+        let state = 'not_applicable'; // Default value
+        if (ledger.STATE) {
+          let stateRaw = '';
+          if (typeof ledger.STATE === 'object' && ledger.STATE._) {
+            stateRaw = String(ledger.STATE._).trim();
+          } else {
+            stateRaw = String(ledger.STATE).trim();
+          }
+
+          if (stateRaw && stateRaw !== '-' && stateRaw.toLowerCase() !== 'na') {
+            state = stateRaw;
+          }
+        }
+
+        // 6️⃣ Extract email
         let email = null;
         if (ledger.EMAIL) {
           let emailRaw = '';
@@ -242,7 +263,7 @@ async function parseTallyCustomers(xmlData) {
           }
         }
 
-        // 6️⃣ ✅ EXTRACT CUSTOMER TYPE FROM UDF:PRODUCTCATEGORY AND CONVERT TO LOWERCASE
+        // 7️⃣ ✅ EXTRACT CUSTOMER TYPE FROM UDF:PRODUCTCATEGORY AND CONVERT TO LOWERCASE
         let customerType = 'direct'; // Default value (now lowercase)
         
         if (ledger.UDF_PRODUCTCATEGORY_LIST) {
@@ -263,12 +284,13 @@ async function parseTallyCustomers(xmlData) {
           }
         }
 
-        // 7️⃣ Build final customer object with lowercase values
+        // 8️⃣ Build final customer object with lowercase values
         const customer = {
           customer_code: customerCode || null,
           customer_name: customerName,
           email: email,
           mobile_number: mobileNumber,
+          state: state,
           customer_type: customerType,
           role: customerType, // Same lowercase value as customer_type
           parent_group: parent
@@ -586,7 +608,7 @@ async function pullCustomersFromTally() {
 
     if (customers.length > 0) {
       console.log(`🎉 Success! Found ${customers.length} customers`);
-      await saveCustomersToMySQL(customers);
+      await saveCustomersToPostgreSQL(customers);
       return customers;
     } else {
       console.log(`❌ No customers found`);
@@ -597,7 +619,7 @@ async function pullCustomersFromTally() {
       const alternativeCustomers = await parseTallyCustomersAlternative(response.data);
       if (alternativeCustomers.length > 0) {
         console.log(`🎉 Alternative parsing found ${alternativeCustomers.length} customers`);
-        await saveCustomersToMySQL(alternativeCustomers);
+        await saveCustomersToPostgreSQL(alternativeCustomers);
         return alternativeCustomers;
       }
     }
@@ -649,7 +671,7 @@ async function pullItemsFromTally() {
 
     if (items.length > 0) {
       console.log(`🎉 Success! Found ${items.length} stock items`);
-      await saveItemsToMySQL(items);
+      await saveItemsToPostgreSQL(items);
       return items;
     } else {
       console.log('❌ No items found using XML parser');
@@ -658,7 +680,7 @@ async function pullItemsFromTally() {
       const altItems = await parseTallyItemsAlternative(response.data);
       if (altItems.length > 0) {
         console.log(`🎉 Alternative parsing found ${altItems.length} items`);
-        await saveItemsToMySQL(altItems);
+        await saveItemsToPostgreSQL(altItems);
         return altItems;
       }
     }
@@ -717,6 +739,16 @@ async function parseTallyCustomersAlternative(xmlData) {
         mobileNumber = extractMobileNumber(mobileRaw);
       }
 
+      // Extract STATE
+      let state = 'not_applicable';
+      const stateMatch = ledgerXml.match(/<STATE>(.*?)<\/STATE>/);
+      if (stateMatch && stateMatch[1]) {
+        const stateRaw = stateMatch[1].trim();
+        if (stateRaw && stateRaw !== '-' && stateRaw.toLowerCase() !== 'na') {
+          state = stateRaw;
+        }
+      }
+
       // Extract email
       let email = null;
       if (emailMatch && emailMatch[1]) {
@@ -742,6 +774,7 @@ async function parseTallyCustomersAlternative(xmlData) {
         customer_code: customerCode,
         mobile_number: mobileNumber,
         email: email,
+        state: state,
         customer_type: customerType,
         role: customerType, // Same lowercase value as customer_type
         parent_group: parent,
@@ -757,9 +790,8 @@ async function parseTallyCustomersAlternative(xmlData) {
   return customers;
 }
 
-
-// SIMPLIFIED FUNCTION TO SAVE CUSTOMERS TO MYSQL - SKIP EMPTY CUSTOMER_CODE
-async function saveCustomersToMySQL(customers) {
+// UPDATED FUNCTION TO SAVE CUSTOMERS TO POSTGRESQL - EXPLICIT DEFAULTS
+async function saveCustomersToPostgreSQL(customers) {
   if (customers.length === 0) {
     console.log('ℹ️ No customers to save');
     return;
@@ -774,44 +806,44 @@ async function saveCustomersToMySQL(customers) {
     return;
   }
   
-  console.log(`💾 Saving ${validCustomers.length} customers to MySQL...`);
+  console.log(`💾 Saving ${validCustomers.length} customers to PostgreSQL...`);
   
   let savedCount = 0;
   let errorCount = 0;
+  let duplicateCount = 0;
   
   for (const customer of validCustomers) {
     try {
-      // ✅ UPDATED INSERT STATEMENT WITH CUSTOMER_TYPE AND ROLE
+      // Use ON CONFLICT DO NOTHING instead of INSERT IGNORE
       const insertSql = `
-        INSERT IGNORE INTO customer 
-        (customer_code, customer_name, mobile_number, email, customer_type, role, parent_group)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO customer 
+        (customer_code, customer_name, mobile_number, state, email, 
+         password, customer_type, role, status, parent_group, firebase_uid)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+        ON CONFLICT (customer_code) DO NOTHING
       `;
       
-      await new Promise((resolve, reject) => {
-        mysqlDb.query(insertSql, [
-          customer.customer_code,
-          customer.customer_name,
-          customer.mobile_number,
-          customer.email,
-          customer.customer_type, // From UDF:PRODUCTCATEGORY
-          customer.role,          // Same as customer_type
-          customer.parent_group || 'Sundry Debtors'
-        ], (err, result) => {
-          if (err) {
-            console.error(`❌ Error inserting customer ${customer.customer_name}:`, err.message);
-            errorCount++;
-          } else {
-            if (result.affectedRows > 0) {
-              console.log(`✅ Added: ${customer.customer_name} (Code: ${customer.customer_code}, Type: ${customer.customer_type})`);
-              savedCount++;
-            } else {
-              console.log(`⏭️ Skipped duplicate: ${customer.customer_name} (Code: ${customer.customer_code})`);
-            }
-          }
-          resolve();
-        });
-      });
+      const result = await pool.query(insertSql, [
+        customer.customer_code,
+        customer.customer_name,
+        customer.mobile_number,
+        customer.state || 'not_applicable',
+        customer.email,
+        null,                              // password is NULL
+        customer.customer_type,            // From UDF:PRODUCTCATEGORY
+        customer.role,                     // Same as customer_type
+        'inactive',                        // Default status
+        customer.parent_group || 'Sundry Debtors',
+        null                               // firebase_uid is NULL
+      ]);
+      
+      if (result.rowCount > 0) {
+        console.log(`✅ Added: ${customer.customer_name} (Code: ${customer.customer_code}, Type: ${customer.customer_type})`);
+        savedCount++;
+      } else {
+        console.log(`⏭️ Skipped duplicate: ${customer.customer_name} (Code: ${customer.customer_code})`);
+        duplicateCount++;
+      }
       
     } catch (error) {
       console.error(`❌ Error processing customer ${customer.customer_name}:`, error.message);
@@ -819,7 +851,7 @@ async function saveCustomersToMySQL(customers) {
     }
   }
   
-  console.log(`✅ MySQL: ${savedCount} new customers added, ${errorCount} errors`);
+  console.log(`✅ PostgreSQL: ${savedCount} new customers added, ${duplicateCount} duplicates skipped, ${errorCount} errors`);
   
   // Log summary of skipped customers
   const skippedCustomers = customers.filter(customer => !customer.customer_code || customer.customer_code.trim() === '');
@@ -831,8 +863,8 @@ async function saveCustomersToMySQL(customers) {
   }
 }
 
-// 🧩 SAVE ITEMS TO MYSQL - SKIP ITEMS WITH EMPTY/NULL ITEM_CODE
-async function saveItemsToMySQL(items) {
+// 🧩 SAVE ITEMS TO POSTGRESQL - SKIP ITEMS WITH EMPTY/NULL ITEM_CODE
+async function saveItemsToPostgreSQL(items) {
   if (items.length === 0) {
     console.log('ℹ️ No stock items to save');
     return;
@@ -848,50 +880,38 @@ async function saveItemsToMySQL(items) {
     return;
   }
 
-  console.log(`💾 Saving ${validItems.length} items to MySQL...`);
+  console.log(`💾 Saving ${validItems.length} items to PostgreSQL...`);
 
   let savedCount = 0;
   let errorCount = 0;
+  let duplicateCount = 0;
 
   for (const item of validItems) {
     try {
       const insertSql = `
-        INSERT IGNORE INTO stock_item 
+        INSERT INTO stock_item 
         (item_code, stock_item_name, parent_group, uom, gst, hsn, rate)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
+        ON CONFLICT (item_code) DO NOTHING
       `;
 
-      await new Promise((resolve) => {
-        mysqlDb.query(
-          insertSql,
-          [
-            item.item_code,
-            item.stock_item_name,
-            item.parent_group,
-            item.uom,
-            item.gst,
-            item.hsn,
-            item.rate,
-          ],
-          (err, result) => {
-            if (err) {
-              console.error(
-                `❌ Error inserting item ${item.stock_item_name}:`,
-                err.message
-              );
-              errorCount++;
-            } else {
-              if (result.affectedRows > 0) {
-                console.log(`✅ Added: ${item.stock_item_name} (Code: ${item.item_code}, Rate: ${item.rate || 'N/A'})`);
-                savedCount++;
-              } else {
-                console.log(`⏭️ Skipped duplicate: ${item.stock_item_name} (Code: ${item.item_code})`);
-              }
-            }
-            resolve();
-          }
-        );
-      });
+      const result = await pool.query(insertSql, [
+        item.item_code,
+        item.stock_item_name,
+        item.parent_group,
+        item.uom,
+        item.gst,
+        item.hsn,
+        item.rate,
+      ]);
+
+      if (result.rowCount > 0) {
+        console.log(`✅ Added: ${item.stock_item_name} (Code: ${item.item_code}, Rate: ${item.rate || 'N/A'})`);
+        savedCount++;
+      } else {
+        console.log(`⏭️ Skipped duplicate: ${item.stock_item_name} (Code: ${item.item_code})`);
+        duplicateCount++;
+      }
     } catch (error) {
       console.error(
         `❌ Error processing item ${item.stock_item_name}:`,
@@ -901,7 +921,7 @@ async function saveItemsToMySQL(items) {
     }
   }
 
-  console.log(`✅ MySQL: ${savedCount} new items added, ${errorCount} errors`);
+  console.log(`✅ PostgreSQL: ${savedCount} new items added, ${duplicateCount} duplicates skipped, ${errorCount} errors`);
   
   // Log summary of skipped items
   const skippedItems = items.filter(item => !item.item_code || item.item_code.trim() === '');
@@ -915,7 +935,7 @@ async function saveItemsToMySQL(items) {
 
 // Main execution
 async function main() {
-  console.log('🚀 Starting Tally to MySQL sync for XML Demo Data...');
+  console.log('🚀 Starting Tally to PostgreSQL sync for XML Demo Data...');
 
   try {
     // Pull customers
@@ -930,7 +950,8 @@ async function main() {
     console.error('❌ Sync failed:', error.message);
   }
 
-  mysqlDb.end();
+  // Close PostgreSQL pool
+  await pool.end();
   console.log('✅ Process completed');
 }
 

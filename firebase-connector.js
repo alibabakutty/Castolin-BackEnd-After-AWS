@@ -1,5 +1,5 @@
 import express from "express";
-import mysql from "mysql2";
+import pkg from "pg";
 import cors from "cors";
 import admin from 'firebase-admin';
 import serviceAccount from "./config/serviceAccountKey.json" with { type: "json" }; 
@@ -13,7 +13,7 @@ const corsOptions = {
     if (!origin) return callback(null, true);
     
     const allowedOrigins = [
-      'https://castolin-frontend-production.up.railway.app', // Your frontend Railway URL
+      'https://castolin-frontend-production.up.railway.app',
       'http://localhost:5173', // Vite dev server
       'http://localhost:3000', // React dev server
       process.env.CLIENT_URL, // From environment variable
@@ -43,27 +43,26 @@ const corsOptions = {
 // Apply CORS middleware
 app.use(cors(corsOptions));
 app.use(express.json());
-// ✅ DATABASE CONFIGURATION FOR RAILWAY
-const dbConfig = {
-  host: process.env.MYSQLHOST || "localhost",
-  user: process.env.MYSQLUSER || "root",
-  password: process.env.MYSQLPASSWORD || "Rup@@.123$",
-  database: process.env.MYSQLDATABASE || "order_management",
-  port: process.env.MYSQLPORT || 3306,
-  waitForConnections: true,
-  connectionLimit: 10,
-  queueLimit: 0
-};
 
-const db = mysql.createPool(dbConfig);
+// ✅ POSTGRES CONFIGURATION FOR RAILWAY
+const pool = new pkg.Pool({
+  host: process.env.PGHOST || "localhost",
+  user: process.env.PGUSER || "postgres",
+  password: process.env.PGPASSWORD || "Rup@@.123$",
+  database: process.env.PGDATABASE || "order_management",
+  port: process.env.PGPORT || 5432,
+  max: 20, // Maximum number of clients in the pool
+  idleTimeoutMillis: 30000,
+  connectionTimeoutMillis: 2000,
+});
 
 // Test database connection
-db.getConnection((err, connection) => {
+pool.connect((err, client, release) => {
   if (err) {
-    console.error("❌ Database connection failed:", err);
+    console.error("❌ PostgreSQL connection failed:", err);
   } else {
-    console.log("✅ Connected to MySQL Database");
-    connection.release();
+    console.log("✅ Connected to PostgreSQL Database");
+    release();
   }
 });
 
@@ -99,70 +98,70 @@ app.get("/api/health", (req, res) => {
 });
 
 // ✅ DATABASE HEALTH CHECK
-app.get("/api/health/db", (req, res) => {
-  db.query('SELECT 1 as test', (err, results) => {
-    if (err) {
-      console.error('Database health check failed:', err);
-      return res.status(500).json({
-        status: 'ERROR',
-        database: 'Connection failed',
-        error: err.message
-      });
-    }
-    
+app.get("/api/health/db", async (req, res) => {
+  try {
+    const result = await pool.query('SELECT 1 as test');
     res.json({
       status: 'OK',
       database: 'Connected successfully',
-      test: results[0].test
+      test: result.rows[0].test
     });
-  });
+  } catch (err) {
+    console.error('Database health check failed:', err);
+    return res.status(500).json({
+      status: 'ERROR',
+      database: 'Connection failed',
+      error: err.message
+    });
+  }
 });
 
 app.get("/me-admin", verifyToken, async (req, res) => {
-  
-      db.query(
-      "SELECT role FROM admins WHERE firebase_uid = ?",
-      [req.uid],
-      (err, rows) => {
-        if (err) return res.status(500).json({errror: err.message})
-        res.json(rows);
-        
-      },);
+  try {
+    const result = await pool.query(
+      "SELECT role FROM admins WHERE firebase_uid = $1",
+      [req.uid]
+    );
+    res.json(result.rows);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 app.get("/me-distributor", verifyToken, async (req, res) => {
-  db.query(
-    "SELECT customer_code, customer_name, role FROM customer WHERE firebase_uid = ?",
-    [req.uid],
-    (err, rows) => {
-      if (err) return res.status(500).json({errror: err.message})
-      res.json(rows);
-    },);
+  try {
+    const result = await pool.query(
+      "SELECT customer_code, customer_name, role FROM customer WHERE firebase_uid = $1",
+      [req.uid]
+    );
+    res.json(result.rows);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 app.get("/me-corporate", verifyToken, async (req, res) => {
-  db.query(
-    "SELECT customer_code, customer_name, role FROM customer WHERE firebase_uid = ?",
-    [req.uid],
-    (err, rows) => {
-      if (err) return res.status(500).json({ error: err.message })
-        res.json(rows);
-    },);
+  try {
+    const result = await pool.query(
+      "SELECT customer_code, customer_name, role FROM customer WHERE firebase_uid = $1",
+      [req.uid]
+    );
+    res.json(result.rows);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 app.put("/distributors/:customer_code", async (req, res) => {
-  const customerCode = req.params.customer_code; // Corrected parameter name
+  const customerCode = req.params.customer_code;
   const updates = req.body;
 
-  // Validate that we have data to update
   if (!updates || Object.keys(updates).length === 0) {
     return res.status(400).json({ error: "No update data provided" });
   }
 
-  // List of allowed fields that can be updated
-  const allowedFields = ['customer_name', 'mobile_number', 'email', 'customer_type', 'password', 'role', 'firebase_uid'];
+  const allowedFields = ['customer_name', 'mobile_number', 'email', 'customer_type', 'password', 'role', 'status', 'firebase_uid'];
   
-  // Filter out any fields that are not in the allowed list
   const filteredUpdates = {};
   Object.keys(updates).forEach(key => {
     if (allowedFields.includes(key)) {
@@ -170,52 +169,44 @@ app.put("/distributors/:customer_code", async (req, res) => {
     }
   });
 
-  // Check if we have any valid fields left after filtering
   if (Object.keys(filteredUpdates).length === 0) {
     return res.status(400).json({ error: "No valid fields to update" });
   }
 
-  // Build the SET clause for SQL dynamically
   const setClause = Object.keys(filteredUpdates)
-    .map(key => `${key} = ?`)
+    .map((key, index) => `${key} = $${index + 1}`)
     .join(', ');
 
   const values = Object.values(filteredUpdates);
-  values.push(customerCode); // Use customerCode for WHERE clause
+  values.push(customerCode);
 
-  // Fixed SQL query - using customer_code instead of usercode
-  const sql = `UPDATE customer SET ${setClause} WHERE customer_code = ?`;
+  const sql = `UPDATE customer SET ${setClause} WHERE customer_code = $${values.length}`;
 
-  db.query(sql, values, (err, result) => {
-    if (err) {
-      console.error(err);
-      return res.status(500).json({ error: err.message });
-    }
-
-    if (result.affectedRows === 0) {
+  try {
+    const result = await pool.query(sql, values);
+    if (result.rowCount === 0) {
       return res.status(404).json({ error: "Distributor not found" });
     }
-
     res.json({ 
       message: "Distributor updated successfully", 
-      affectedRows: result.affectedRows 
+      affectedRows: result.rowCount 
     });
-  });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
 });
 
 app.put("/corporates/:customer_code", async (req, res) => {
-  const customerCode = req.params.customer_code; // Corrected parameter name
+  const customerCode = req.params.customer_code;
   const updates = req.body;
 
-  // Validate that we have data to update
   if (!updates || Object.keys(updates).length === 0) {
     return res.status(400).json({ error: "No update data provided" });
   }
 
-  // List of allowed fields that can be updated
-  const allowedFields = ['customer_name', 'mobile_number', 'email', 'customer_type', 'password', 'role', 'firebase_uid'];
+  const allowedFields = ['customer_name', 'mobile_number', 'email', 'customer_type', 'password', 'role', 'status', 'firebase_uid'];
   
-  // Filter out any fields that are not in the allowed list
   const filteredUpdates = {};
   Object.keys(updates).forEach(key => {
     if (allowedFields.includes(key)) {
@@ -223,43 +214,38 @@ app.put("/corporates/:customer_code", async (req, res) => {
     }
   });
 
-  // Check if we have any valid fields left after filtering
   if (Object.keys(filteredUpdates).length === 0) {
     return res.status(400).json({ error: "No valid fields to update" });
   }
 
-  // Build the SET clause for SQL dynamically
   const setClause = Object.keys(filteredUpdates)
-    .map(key => `${key} = ?`)
+    .map((key, index) => `${key} = $${index + 1}`)
     .join(', ');
 
   const values = Object.values(filteredUpdates);
-  values.push(customerCode); // Use customerCode for WHERE clause
+  values.push(customerCode);
 
-  // Fixed SQL query - using customer_code instead of usercode
-  const sql = `UPDATE customer SET ${setClause} WHERE customer_code = ?`;
+  const sql = `UPDATE customer SET ${setClause} WHERE customer_code = $${values.length}`;
 
-  db.query(sql, values, (err, result) => {
-    if (err) {
-      console.error(err);
-      return res.status(500).json({ error: err.message });
-    }
-
-    if (result.affectedRows === 0) {
+  try {
+    const result = await pool.query(sql, values);
+    if (result.rowCount === 0) {
       return res.status(404).json({ error: "Direct Order not found" });
     }
-
     res.json({ 
       message: "Direct Order updated successfully", 
-      affectedRows: result.affectedRows 
+      affectedRows: result.rowCount 
     });
-  });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // Admin signup (only for admins table)
 app.post("/signup-admin", verifyToken, async (req, res) => {
   const { username, email, mobile_number } = req.body;
-  const firebaseUid = req.uid; // Get UID from verified token
+  const firebaseUid = req.uid;
 
   console.log("Admin signup request:", { username, email, firebaseUid });
 
@@ -270,7 +256,6 @@ app.post("/signup-admin", verifyToken, async (req, res) => {
     });
   }
 
-  // Validate email
   const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
   if (!emailRegex.test(email)) {
     return res.status(400).json({ 
@@ -280,51 +265,47 @@ app.post("/signup-admin", verifyToken, async (req, res) => {
   }
 
   try {
-    const checkSql = "SELECT * FROM admins WHERE firebase_uid = ? OR email = ?";
-    db.query(checkSql, [firebaseUid, email], (err, rows) => {
-      if (err) {
-        console.error("Database check error:", err);
-        return res.status(500).json({ success: false, error: "Database error" });
-      }
+    const checkResult = await pool.query(
+      "SELECT * FROM admins WHERE firebase_uid = $1 OR email = $2",
+      [firebaseUid, email]
+    );
 
-      if (rows.length > 0) {
-        const existingAdmin = rows[0];
-        return res.status(200).json({ 
-          success: true,
-          message: "Admin already exists", 
-          role: existingAdmin.role,
-          userType: "admin"
-        });
-      }
-
-      const insertSql = `
-        INSERT INTO admins (username, email, firebase_uid, role, mobile_number)
-        VALUES (?, ?, ?, ?, ?)
-      `;
-      const role = "admin";
-
-      db.query(insertSql, [username, email, firebaseUid, role, mobile_number || null], (err, result) => {
-        if (err) {
-          console.error("Database insert error:", err);
-          return res.status(500).json({ 
-            success: false,
-            error: "Failed to create admin account" 
-          });
-        }
-
-        console.log("New admin added to MySQL, ID:", result.insertId);
-        res.status(201).json({ 
-          success: true,
-          message: "Admin signup successful", 
-          role,
-          userType: "admin",
-          userId: result.insertId
-        });
+    if (checkResult.rows.length > 0) {
+      const existingAdmin = checkResult.rows[0];
+      return res.status(200).json({ 
+        success: true,
+        message: "Admin already exists", 
+        role: existingAdmin.role,
+        userType: "admin"
       });
+    }
+
+    const insertSql = `
+      INSERT INTO admins (username, email, firebase_uid, role, mobile_number)
+      VALUES ($1, $2, $3, $4, $5)
+      RETURNING id
+    `;
+    const role = "admin";
+
+    const insertResult = await pool.query(
+      insertSql, 
+      [username, email, firebaseUid, role, mobile_number || null]
+    );
+
+    console.log("New admin added to PostgreSQL, ID:", insertResult.rows[0].id);
+    res.status(201).json({ 
+      success: true,
+      message: "Admin signup successful", 
+      role,
+      userType: "admin",
+      userId: insertResult.rows[0].id
     });
-  } catch (error) {
-    console.error("Signup error:", error);
-    res.status(500).json({ success: false, error: "Internal server error" });
+  } catch (err) {
+    console.error("Database error:", err);
+    res.status(500).json({ 
+      success: false,
+      error: err.message 
+    });
   }
 });
 
@@ -333,35 +314,27 @@ app.post("/login-admin", verifyToken, async (req, res) => {
   const firebaseUid = req.uid;
 
   try {
-    db.query(
-      "SELECT id, username, mobile_number, email, role, firebase_uid FROM admins WHERE firebase_uid = ?",
-      [firebaseUid],
-      (err, rows) => {
-        if (err) {
-          return res.status(500).json({ 
-            success: false,
-            error: "Database error" 
-          });
-        }
-
-        if (rows.length === 0) {
-          return res.status(404).json({ 
-            success: false,
-            error: "Admin not found. Please sign up first." 
-          });
-        }
-
-        const admin = rows[0];
-        res.json({
-          success: true,
-          message: "Admin login successful",
-          user: admin,
-          userType: 'admin'
-        });
-      }
+    const result = await pool.query(
+      "SELECT id, username, mobile_number, email, role, firebase_uid FROM admins WHERE firebase_uid = $1",
+      [firebaseUid]
     );
-  } catch (error) {
-    console.error("Admin login error:", error);
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ 
+        success: false,
+        error: "Admin not found. Please sign up first." 
+      });
+    }
+
+    const admin = result.rows[0];
+    res.json({
+      success: true,
+      message: "Admin login successful",
+      user: admin,
+      userType: 'admin'
+    });
+  } catch (err) {
+    console.error("Admin login error:", err);
     res.status(500).json({ 
       success: false,
       error: "Internal server error" 
@@ -370,202 +343,215 @@ app.post("/login-admin", verifyToken, async (req, res) => {
 });
 
 // Get specific distributor by usercode
-app.get("/distributors/:customer_code", (req, res) => {
+app.get("/distributors/:customer_code", async (req, res) => {
   const { customer_code } = req.params;
 
-  // check if usercode is valid
   if (!customer_code) {
     return res.status(400).json({ error: "Distributor usercode is required" });
   }
 
-  // Use parameterized query to prevent SQL injection
-  const sql = "SELECT * FROM customer WHERE customer_code = ?";
+  try {
+    const result = await pool.query(
+      "SELECT * FROM customer WHERE customer_code = $1",
+      [customer_code]
+    );
 
-  db.query(sql, [customer_code], (err, results) => {
-    if (err) {
-      console.error("Database query error:", err);
-      return res.status(500).json({ error: "Internal server error" });
-    }
-
-    if (results.length === 0) {
+    if (result.rows.length === 0) {
       return res.status(404).json({ error: "Distributor not found" });
     }
 
-    // Return the single item object
-    res.json(results[0]);
-  });
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error("Database query error:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
 });
 
 // Get specific corporate by id
-app.get("/corporates/:customer_code", (req, res) => {
+app.get("/corporates/:customer_code", async (req, res) => {
   const { customer_code } = req.params;
 
-  // check if ID is valid
   if (!customer_code) {
-    return res.status(400).json({ error: "Customer Code is required!"});
+    return res.status(400).json({ error: "Customer Code is required!" });
   }
 
-  // use parameterized query to prevent SQL injection
-  const sql = "SELECT * FROM customer WHERE customer_code = ?";
+  try {
+    const result = await pool.query(
+      "SELECT * FROM customer WHERE customer_code = $1",
+      [customer_code]
+    );
 
-  db.query(sql, [customer_code], (err, results) => {
-    if (err) {
-      console.error("Database query error:", err);
-      return res.status(500).json({
-        error: "Internal server error"
-      });
+    if (result.rows.length === 0) {
+      return res.status(400).json({ error: "Direct Order not found" });
     }
 
-    if (results.length === 0) {
-      return res.status(400).json({
-        error: "Direct Order not found"
-      });
-    }
-    // return the single item object
-    res.json(results[0]);
-  })
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error("Database query error:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
 });
 
-app.get("/stock_item", (req, res) => {
-  db.query("SELECT * FROM stock_item", (err, results) => {
-    if (err) return res.status(500).json({ error: err });
-    res.json(results);
-  });
+app.get("/stock_item", async (req, res) => {
+  try {
+    const result = await pool.query("SELECT * FROM stock_item");
+    res.json(result.rows);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
-app.get("/customer", (req, res) => {
-  db.query("SELECT * FROM customer", (err, results) => {
-    if (err) return res.status(500).json({ error: err });
-    res.json(results);
-  })
+app.get("/customer", async (req, res) => {
+  try {
+    const result = await pool.query("SELECT * FROM customer");
+    res.json(result.rows);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
-app.get("/admins", (req, res) => {
-  db.query("SELECT * FROM admins", (err, results) => {
-    if (err) return res.status(500).json({ error: err });
-    res.json(results);
-  });
+app.get("/admins", async (req, res) => {
+  try {
+    const result = await pool.query("SELECT * FROM admins");
+    res.json(result.rows);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
-app.get("/distributors", (req, res) => {
-  db.query(`SELECT * FROM customer WHERE customer_type = "distributor"`, (err, results) => {
-    if (err) return res.status(500).json({ error: err });
-    res.json(results);
-  })
+app.get("/distributors", async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT * FROM customer WHERE customer_type = 'distributor'`
+    );
+    res.json(result.rows);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
-app.get("/corporates", (req, res) => {
-  db.query(`SELECT * FROM customer WHERE customer_type = "direct" `, (err, results) => {
-    if (err) return res.status(500).json({ error: err });
-    res.json(results);
-  })
+app.get("/corporates", async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT * FROM customer WHERE customer_type = 'direct'`
+    );
+    res.json(result.rows);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
-app.get("/orders", (req, res) => {
-  db.query("SELECT * FROM orders", (err, results) => {
-    if (err) return res.status(500).json({ error: err });
-    res.json(results);
-  })
+app.get("/orders", async (req, res) => {
+  try {
+    const result = await pool.query("SELECT * FROM orders");
+    res.json(result.rows);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // Get specific stock item by item code
-app.get("/stock_item/:item_code", (req, res) => {
+app.get("/stock_item/:item_code", async (req, res) => {
   const { item_code } = req.params;
 
   if (!item_code) {
     return res.status(400).json({ error: "Stock Item Code is required" });
   }
 
-  const sql = "SELECT * FROM stock_item WHERE item_code = ?";
+  try {
+    const result = await pool.query(
+      "SELECT * FROM stock_item WHERE item_code = $1",
+      [item_code]
+    );
 
-  db.query(sql, [item_code], (err, results) => {
-    if (err) {
-      console.error("Database query error:", err);
-      return res.status(500).json({ error: "Internal server error" });
-    }
-
-    if (results.length === 0) {
+    if (result.rows.length === 0) {
       return res.status(404).json({ error: "Stock item not found" });
     }
 
-    res.json(results[0]);
-  })
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error("Database query error:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
 });
 
 // Get specific customer by customer_code only
-app.get("/customer/:customer_code", (req, res) => {
+app.get("/customer/:customer_code", async (req, res) => {
   const { customer_code } = req.params;
 
   if (!customer_code) {
     return res.status(400).json({ error: "Customer code is required" });
   }
 
-  const sql = "SELECT * FROM customer WHERE customer_code = ?";
+  try {
+    const result = await pool.query(
+      "SELECT * FROM customer WHERE customer_code = $1",
+      [customer_code]
+    );
 
-  db.query(sql, [customer_code], (err, results) => {
-    if (err) {
-      console.error("Database query error:", err);
-      return res.status(500).json({ error: "Internal server error" });
-    }
-
-    if (results.length === 0) {
+    if (result.rows.length === 0) {
       return res.status(404).json({ error: "Customer not found" });
     }
 
-    res.json(results[0]);
-  });
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error("Database query error:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
 });
 
 // Get specific admin by id
-app.get("/admins/:id", (req, res) => {
+app.get("/admins/:id", async (req, res) => {
   const userId = req.params.id;
 
   if (!userId) {
     return res.status(400).json({ error: "Admin ID is required" });
   }
 
-  const sql = "SELECT * FROM admins WHERE id = ?";
+  try {
+    const result = await pool.query(
+      "SELECT * FROM admins WHERE id = $1",
+      [userId]
+    );
 
-  db.query(sql, [userId], (err, results) => {
-    if (err) {
-      console.error("Database query error:", err);
-      return res.status(500).json({ error: "Internal server error" });
-    }
-
-    if (results.length === 0) {
+    if (result.rows.length === 0) {
       return res.status(400).json({ error: "Admin not found" });
     }
 
-    res.json(results[0]);
-  })
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error("Database query error:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
 });
 
 // get specific order by id
-app.get("/orders/:id", (req, res) => {
+app.get("/orders/:id", async (req, res) => {
   const orderId = req.params.id;
 
   if (!orderId) {
     return res.status(400).json({ error: "Order ID is required" });
   }
 
-  const sql = "SELECT * FROM orders WHERE id = ?";
+  try {
+    const result = await pool.query(
+      "SELECT * FROM orders WHERE id = $1",
+      [orderId]
+    );
 
-  db.query(sql, [orderId], (err, results) => {
-    if (err) {
-      console.error("Database query error:", err);
-      return res.status(500).json({ error: "Internal server error" });
-    }
-
-    if (results.length === 0) {
+    if (result.rows.length === 0) {
       return res.status(404).json({ error: "Order not found" });
     }
 
-    res.json(results[0]);
-  });
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error("Database query error:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
 });
 
 // get all orders by order number (optionally filter by created_at)
-app.get("/orders-by-number/:order_no", (req, res) => {
+app.get("/orders-by-number/:order_no", async (req, res) => {
   const { order_no } = req.params;
   const { created_at } = req.query; // optional filter
 
@@ -573,82 +559,96 @@ app.get("/orders-by-number/:order_no", (req, res) => {
     return res.status(400).json({ error: "Order Number is required" });
   }
 
-  // Base query
-  let sql = "SELECT * FROM orders WHERE order_no = ?";
+  let sql = "SELECT * FROM orders WHERE order_no = $1";
   const params = [order_no];
 
   // Optional created_at filter
   if (created_at) {
-    sql += " AND created_at = ?";
+    sql += " AND created_at = $2";
     params.push(created_at);
   }
 
-  db.query(sql, params, (err, results) => {
-    if (err) {
-      console.error("Database query error:", err);
-      return res.status(500).json({ error: "Internal server error" });
-    }
+  try {
+    const result = await pool.query(sql, params);
 
-    if (results.length === 0) {
+    if (result.rows.length === 0) {
       return res.status(404).json({ error: "No orders found" });
     }
 
-    // ✅ Return all matching rows, not just the first one
-    res.json(results);
-  });
+    res.json(result.rows);
+  } catch (err) {
+    console.error("Database query error:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
 });
 
-app.post('/orders', (req, res) => {
+app.post('/orders', async (req, res) => {
   const data = req.body;
 
   if (!Array.isArray(data) || data.length === 0) {
     return res.status(400).json({ error: "No orders provided" });
   }
 
-  const sql = `
-    INSERT INTO orders 
-    (voucher_type, order_no, order_date, status, customer_code, executive, role, customer_name, item_code, item_name, hsn, gst, delivery_date, delivery_mode, transporter_name, quantity, uom, rate, amount, net_rate, gross_amount, disc_percentage, disc_amount, spl_disc_percentage, spl_disc_amount, total_quantity, total_amount, remarks) 
-    VALUES ?
-  `;
+  const client = await pool.connect();
+  
+  try {
+    await client.query('BEGIN');
+    
+    const insertPromises = data.map(item => {
+      const insertSql = `
+        INSERT INTO orders 
+        (voucher_type, order_no, order_date, status, customer_code, executive, role, customer_name, item_code, item_name, hsn, gst, delivery_date, delivery_mode, transporter_name, quantity, uom, rate, amount, net_rate, gross_amount, disc_percentage, disc_amount, spl_disc_percentage, spl_disc_amount, total_quantity, total_amount, remarks) 
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28)
+        RETURNING id
+      `;
+      
+      return client.query(insertSql, [
+        item.voucher_type,
+        item.order_no,
+        item.date,
+        item.status,
+        item.customer_code,
+        item.executive,
+        item.role,
+        item.customer_name,
+        item.item_code,
+        item.item_name,
+        item.hsn,
+        String(item.gst).replace(/\s*%/, ''),
+        item.delivery_date,
+        item.delivery_mode,
+        item.transporter_name,
+        item.quantity,
+        item.uom,
+        item.rate,
+        item.amount,
+        item.net_rate,
+        item.gross_amount,
+        item.disc_percentage,
+        item.disc_amount,
+        item.spl_disc_percentage,
+        item.spl_disc_amount,
+        item.total_quantity ?? 0.00,
+        item.total_amount ?? 0.00,
+        item.remarks ?? '',
+      ]);
+    });
 
-  const values = data.map(item => [
-    item.voucher_type,
-    item.order_no,
-    item.date,
-    item.status,
-    item.customer_code,
-    item.executive,
-    item.role,
-    item.customer_name,
-    item.item_code,
-    item.item_name,
-    item.hsn,
-    String(item.gst).replace(/\s*%/, ''),
-    item.delivery_date,
-    item.delivery_mode,
-    item.transporter_name,
-    item.quantity,
-    item.uom,
-    item.rate,
-    item.amount,
-    item.net_rate,
-    item.gross_amount,
-    item.disc_percentage,
-    item.disc_amount,
-    item.spl_disc_percentage,
-    item.spl_disc_amount,
-    item.total_quantity ?? 0.00,
-    item.total_amount ?? 0.00,
-    item.remarks ?? '',
-  ]);
-
-  db.query(sql, [values], (err, result) => {
-    if (err) {
-      console.error(err);
-      return res.status(500).json({ error: err.message });
-    }
-    res.json({ message: "Orders inserted successfully", result });
-  });
+    const results = await Promise.all(insertPromises);
+    await client.query('COMMIT');
+    
+    res.json({ 
+      message: "Orders inserted successfully", 
+      insertedCount: results.length,
+      ids: results.map(r => r.rows[0].id)
+    });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  } finally {
+    client.release();
+  }
 });
 
 // ✅ Update specific fields of orders by order number (but match by ID)
@@ -656,7 +656,6 @@ app.put("/orders-by-number/:order_no", async (req, res) => {
   const { order_no } = req.params;
   const updates = req.body;
 
-  // 🔹 Basic validation
   if (!order_no || order_no.trim() === "") {
     return res.status(400).json({ error: "Order Number is required" });
   }
@@ -665,7 +664,6 @@ app.put("/orders-by-number/:order_no", async (req, res) => {
     return res.status(400).json({ error: "No update data provided" });
   }
 
-  // 🔹 Validate each update object
   const validationErrors = [];
   updates.forEach((update, index) => {
     if (!update || typeof update !== "object") {
@@ -703,113 +701,75 @@ app.put("/orders-by-number/:order_no", async (req, res) => {
     });
   }
 
-  // ✅ Get a connection from the pool for transaction
-  db.getConnection((err, connection) => {
-    if (err) {
-      console.error("Failed to get database connection:", err);
-      return res.status(500).json({ error: "Database connection failed" });
+  const client = await pool.connect();
+  
+  try {
+    await client.query('BEGIN');
+
+    const allowedFields = [
+      "status",
+      "disc_percentage",
+      "disc_amount",
+      "spl_disc_percentage",
+      "spl_disc_amount",
+      "net_rate",
+      "gross_amount",
+      "total_quantity",
+      "total_amount",
+      "remarks",
+      "quantity",
+      "delivery_date",
+      "delivery_mode",
+      "transporter_name"
+    ];
+
+    for (const [index, update] of updates.entries()) {
+      const { id, ...fields } = update;
+
+      const filteredFields = {};
+      for (const key of Object.keys(fields)) {
+        if (allowedFields.includes(key)) {
+          filteredFields[key] = fields[key];
+        }
+      }
+
+      if (Object.keys(filteredFields).length === 0) {
+        console.warn(`Skipping update ${index}: No valid fields`);
+        continue;
+      }
+
+      const setClause = Object.keys(filteredFields)
+        .map((field, idx) => `${field} = $${idx + 1}`)
+        .join(", ");
+
+      const values = Object.values(filteredFields);
+      values.push(id);
+
+      const sql = `UPDATE orders SET ${setClause} WHERE id = $${values.length}`;
+
+      const result = await client.query(sql, values);
+      
+      if (result.rowCount === 0) {
+        throw new Error(`No record found for id ${id}`);
+      }
     }
 
-    // ✅ Proceed with transaction using the connection
-    connection.beginTransaction(async (transactionErr) => {
-      if (transactionErr) {
-        connection.release();
-        console.error("Transaction begin failed:", transactionErr);
-        return res.status(500).json({ error: "Failed to start transaction" });
-      }
-
-      try {
-        const allowedFields = [
-          "status",
-          "disc_percentage",
-          "disc_amount",
-          "spl_disc_percentage",
-          "spl_disc_amount",
-          "net_rate",
-          "gross_amount",
-          "total_quantity",
-          "total_amount",
-          "remarks",
-          "quantity",
-          "delivery_date",
-          "delivery_mode",
-          "transporter_name"
-        ];
-
-        for (const [index, update] of updates.entries()) {
-          const { id, ...fields } = update;
-
-          // Filter only allowed fields
-          const filteredFields = {};
-          for (const key of Object.keys(fields)) {
-            if (allowedFields.includes(key)) {
-              filteredFields[key] = fields[key];
-            }
-          }
-
-          if (Object.keys(filteredFields).length === 0) {
-            console.warn(`Skipping update ${index}: No valid fields`);
-            continue;
-          }
-
-          // Build SQL dynamically but safely
-          const setClause = Object.keys(filteredFields)
-            .map((field) => `\`${field}\` = ?`)
-            .join(", ");
-
-          const values = Object.values(filteredFields);
-
-          // ✅ Update only by ID (order_no not used in WHERE)
-          const sql = `UPDATE orders SET ${setClause} WHERE id = ?`;
-          const params = [...values, id];
-
-          console.log(`Executing update ${index}:`, sql, params);
-
-          await new Promise((resolve, reject) => {
-            connection.query(sql, params, (err, result) => {
-              if (err) {
-                console.error(`Database error in update ${index}:`, err);
-                return reject(err);
-              }
-              if (result.affectedRows === 0) {
-                return reject(new Error(`No record found for id ${id}`));
-              }
-              resolve();
-            });
-          });
-        }
-
-        // ✅ Commit transaction
-        await new Promise((resolve, reject) => {
-          connection.commit((err) => {
-            if (err) {
-              return reject(err);
-            }
-            resolve();
-          });
-        });
-
-        connection.release(); // Release connection back to pool
-
-        res.json({
-          message: "Orders updated successfully",
-          updatedCount: updates.length,
-        });
-
-      } catch (err) {
-        console.error("Transaction failed:", err.message);
-        
-        // ✅ Rollback transaction
-        connection.rollback(() => {
-          connection.release(); // Release connection even on error
-          res.status(400).json({
-            error: "Update failed",
-            details: err.message,
-          });
-        });
-      }
+    await client.query('COMMIT');
+    
+    res.json({
+      message: "Orders updated successfully",
+      updatedCount: updates.length,
     });
-  });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error("Transaction failed:", err.message);
+    res.status(400).json({
+      error: "Update failed",
+      details: err.message,
+    });
+  } finally {
+    client.release();
+  }
 });
 
 // ✅ USE PORT FROM ENVIRONMENT VARIABLE (RAILWAY PROVIDES THIS)
