@@ -5,7 +5,6 @@ import admin from 'firebase-admin';
 import serviceAccount from "./config/serviceAccountKey.json" with { type: "json" }; 
 
 const app = express(); 
-
 // ✅ PROPER CORS CONFIGURATION FOR RAILWAY
 const corsOptions = {
   origin: function (origin, callback) {

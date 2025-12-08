@@ -34,7 +34,6 @@ pool.connect((err, client, release) => {
     release();
   }
 });
-
 const app = express();
 const port = 3000;
 
@@ -152,7 +151,6 @@ async function parseTallyCustomers(xmlData) {
       mergeAttrs: true,
       trim: true
     });
-
     console.log('📊 XML parsed successfully');
 
     let ledgers = [];
