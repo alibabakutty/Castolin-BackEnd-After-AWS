@@ -2,17 +2,18 @@ import express from "express";
 import pkg from "pg";
 import cors from "cors";
 import admin from 'firebase-admin';
-import serviceAccount from "./config/serviceAccountKey.json" with { type: "json" }; 
+import dotenv from 'dotenv';
+dotenv.config();
 
-const app = express(); 
-// ✅ PROPER CORS CONFIGURATION FOR RAILWAY
+const app = express();
+
+// ✅ PROPER CORS CONFIGURATION
 const corsOptions = {
   origin: function (origin, callback) {
     // Allow requests with no origin (like mobile apps, Postman, server-to-server)
     if (!origin) return callback(null, true);
     
     const allowedOrigins = [
-      'https://castolin-frontend-production.up.railway.app',
       'http://localhost:5173', // Vite dev server
       'http://localhost:3000', // React dev server
       process.env.CLIENT_URL, // From environment variable
@@ -43,16 +44,19 @@ const corsOptions = {
 app.use(cors(corsOptions));
 app.use(express.json());
 
-// ✅ POSTGRES CONFIGURATION FOR RAILWAY
+// ✅ POSTGRES CONFIGURATION FOR NEON
 const pool = new pkg.Pool({
-  host: process.env.PGHOST || "localhost",
-  user: process.env.PGUSER || "postgres",
-  password: process.env.PGPASSWORD || "Rup@@.123$",
-  database: process.env.PGDATABASE || "order_management",
-  port: process.env.PGPORT || 5432,
-  max: 20, // Maximum number of clients in the pool
+  connectionString: process.env.DATABASE_URL,
+  max: 10, // Reduced from 20 for Neon
   idleTimeoutMillis: 30000,
-  connectionTimeoutMillis: 2000,
+  connectionTimeoutMillis: 10000, // Increased to 10 seconds
+  ssl: {
+    rejectUnauthorized: false, // Always required for Neon
+    sslmode: 'require'
+  },
+  // Neon-specific options
+  keepAlive: true,
+  keepAliveInitialDelayMillis: 10000,
 });
 
 // Test database connection
@@ -60,14 +64,33 @@ pool.connect((err, client, release) => {
   if (err) {
     console.error("❌ PostgreSQL connection failed:", err);
   } else {
-    console.log("✅ Connected to PostgreSQL Database");
+    console.log("✅ Connected to PostgreSQL Database (Neon)");
     release();
   }
 });
 
-admin.initializeApp({
-  credential: admin.credential.cert(serviceAccount),
-});
+// ✅ FIREBASE INITIALIZATION WITH BASE64 SERVICE ACCOUNT
+try {
+  // Decode base64 service account from environment variable
+  const serviceAccountBase64 = process.env.FIREBASE_SERVICE_ACCOUNT_BASE64;
+  
+  if (!serviceAccountBase64) {
+    console.error("❌ FIREBASE_SERVICE_ACCOUNT_BASE64 environment variable is not set");
+    throw new Error("Firebase service account configuration missing");
+  }
+  
+  // Decode base64 string to JSON
+  const serviceAccountJson = Buffer.from(serviceAccountBase64, 'base64').toString('utf-8');
+  const serviceAccount = JSON.parse(serviceAccountJson);
+  
+  admin.initializeApp({
+    credential: admin.credential.cert(serviceAccount),
+  });
+  console.log("✅ Firebase Admin SDK initialized successfully");
+} catch (error) {
+  console.error("❌ Firebase initialization failed:", error);
+  process.exit(1); // Exit if Firebase fails to initialize
+}
 
 const verifyToken = async (req, res, next) => {
   const token = req.headers.authorization?.split(" ")[1];
@@ -83,13 +106,14 @@ const verifyToken = async (req, res, next) => {
   }
 };
 
-// ✅ HEALTH CHECK ENDPOINT (IMPORTANT FOR RAILWAY)
+// ✅ HEALTH CHECK ENDPOINT
 app.get("/api/health", (req, res) => {
   res.status(200).json({
     status: 'OK',
     message: 'Backend is running successfully',
     timestamp: new Date().toISOString(),
     environment: process.env.NODE_ENV || 'development',
+    database: process.env.DATABASE_URL ? 'Configured' : 'Not configured',
     cors: {
       allowedOrigins: corsOptions.origin.toString()
     }
@@ -115,6 +139,30 @@ app.get("/api/health/db", async (req, res) => {
   }
 });
 
+// ✅ FIREBASE HEALTH CHECK
+app.get("/api/health/firebase", async (req, res) => {
+  try {
+    // Try to get the Firebase project ID to verify Firebase is working
+    const projectId = process.env.FIREBASE_SERVICE_ACCOUNT_BASE64 
+      ? JSON.parse(Buffer.from(process.env.FIREBASE_SERVICE_ACCOUNT_BASE64, 'base64').toString('utf-8')).project_id
+      : null;
+    
+    res.json({
+      status: 'OK',
+      firebase: 'Initialized successfully',
+      projectId: projectId
+    });
+  } catch (err) {
+    console.error('Firebase health check failed:', err);
+    return res.status(500).json({
+      status: 'ERROR',
+      firebase: 'Initialization failed',
+      error: err.message
+    });
+  }
+});
+
+// ✅ REST OF YOUR ROUTES (unchanged)
 app.get("/me-admin", verifyToken, async (req, res) => {
   try {
     const result = await pool.query(
@@ -771,11 +819,12 @@ app.put("/orders-by-number/:order_no", async (req, res) => {
   }
 });
 
-// ✅ USE PORT FROM ENVIRONMENT VARIABLE (RAILWAY PROVIDES THIS)
+// ✅ USE PORT FROM ENVIRONMENT VARIABLE (RENDER PROVIDES THIS)
 const PORT = process.env.PORT || 5000;
 
 app.listen(PORT, () => {
   console.log(`🚀 Backend running on port ${PORT}`);
   console.log(`🌐 Environment: ${process.env.NODE_ENV || 'development'}`);
   console.log(`🔗 Health check: http://localhost:${PORT}/api/health`);
+  console.log(`📊 Database: ${process.env.DATABASE_URL ? 'Neon configured' : 'Not configured'}`);
 });
