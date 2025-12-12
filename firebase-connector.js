@@ -15,6 +15,7 @@ const corsOptions = {
     
     const allowedOrigins = [
       'http://144.24.137.58:8080', // Oracle cloud
+      'http://144.24.137.58',      // Without port
       'http://localhost:5173', // Vite dev server
       'http://localhost:3000', // React dev server
       process.env.CLIENT_URL, // From environment variable
