@@ -3,7 +3,7 @@ import dotenv from 'dotenv';
 
 dotenv.config();
 
-export const initFirebase = () => {
+export const initFirebase = () => { 
   try {
     const base64 = process.env.FIREBASE_SERVICE_ACCOUNT_BASE64;
     if (!base64) {

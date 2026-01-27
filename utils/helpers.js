@@ -1,10 +1,15 @@
+
 export const toOracleDate = (val) => {
   if (!val) return null;
-  if (val instanceof Date) return val;
 
-  // Accept YYYY-MM-DD safely
+  if (val instanceof Date) {
+    return val;
+  }
+
   const d = new Date(val);
-  return isNaN(d) ? null : d;
+  if (isNaN(d.getTime())) return null;
+
+  return d; // ✅ MUST be Date object
 };
 
 export const validateEmail = (email) => {
