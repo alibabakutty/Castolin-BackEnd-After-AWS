@@ -23,13 +23,10 @@ export default defineConfig({
   },
 
   projects: [
-    // 🔹 UNIT TESTS (no server, no baseURL)
     {
       name: 'unit',
       testMatch: '**/unit/**/*.spec.js',
     },
-
-    // 🔹 INTEGRATION TESTS (API)
     {
       name: 'integration',
       testMatch: '**/integration/**/*.spec.js',
@@ -41,8 +38,6 @@ export default defineConfig({
         },
       },
     },
-
-    // 🔹 E2E TESTS
     {
       name: 'e2e',
       testMatch: '**/e2e/**/*.spec.js',
@@ -56,6 +51,6 @@ export default defineConfig({
     },
   ],
 
-  globalSetup: require.resolve('./tests/setup/global-setup.js'),
-  globalTeardown: require.resolve('./tests/setup/global-teardown.js'),
+  globalSetup: new URL('./tests/setup/global-setup.js', import.meta.url),
+  globalTeardown: new URL('./tests/setup/global-teardown.js', import.meta.url),
 });
