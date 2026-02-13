@@ -5,4 +5,5 @@ node_modules/
 config/serviceKey.json
 config/serviceAccountKey.json
 instantclient_21_19/
+instantclient_21_21/
 Wallet_MYFREEDB/
