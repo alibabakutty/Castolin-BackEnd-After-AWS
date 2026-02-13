@@ -10,6 +10,7 @@ export const verifyToken = async (req, res, next) => {
     const token = auth.split(' ')[1];
     const decoded = await admin.auth().verifyIdToken(token);
     req.uid = decoded.uid;
+    req.email = decoded.email;
     next();
   } catch (error) {
     console.error('Token verification error:', error);
