@@ -131,7 +131,7 @@ router.post('/orders', async (req, res) => {
       // Normalize and validate required fields
       const order_no = item.order_no?.trim();
       const order_date = toOracleDate(item.date) || new Date();
-      const delivery_date = toOracleDate(item.delivery_date) || order_date; // default to order_date
+      const delivery_date = toOracleDate(item.delivery_date); // default to order_date
       if (!order_no) throw new Error(`Order number is required for item at index ${index}`);
       if (!delivery_date) throw new Error(`Delivery date is required for order ${order_no}`);
 
